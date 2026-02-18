@@ -4,49 +4,47 @@ import numpy as np
 
 # --- 核心邏輯 (股泰流分析器) ---
 class GuTaiWarrantAnalyzer:
-    def __init__(self, stock_price):
-        self.stock_price = stock_price
+    def __init__(self):
+        pass # 不再需要初始化股價，改為動態讀取
 
     def analyze(self, df):
-        # 1. 欄位對應與資料清洗
-        # 建立標準欄位對照表
-        col_map = {
-            '權證買價': '買價', '權證賣價': '賣價', 
-            '權證成交量': '成交量', '最新流通在外張數': '流通張數',
-            '流通在外估計張數': '流通張數'
-        }
-        df = df.rename(columns=col_map)
+        # 1. 欄位對應與清洗
+        # 將合併後的複雜欄位名稱簡化
+        col_mapping = {}
+        for c in df.columns:
+            if '權證' in c and '買價' in c: col_mapping[c] = '買價'
+            elif '權證' in c and '賣價' in c: col_mapping[c] = '賣價'
+            elif '權證' in c and '履約' in c: col_mapping[c] = '履約價' # 防呆
+            elif '履約價' in c: col_mapping[c] = '履約價'
+            elif '剩餘' in c and '天' in c: col_mapping[c] = '剩餘天數'
+            elif '標的' in c and '價格' in c: col_mapping[c] = '標的價格'
+            elif '標的' in c and '名稱' in c: col_mapping[c] = '標的名稱'
+            elif '標的' in c and '代碼' in c: col_mapping[c] = '標的代碼'
+            elif '權證' in c and '名稱' in c: col_mapping[c] = '權證名稱'
+            elif '權證' in c and '代碼' in c: col_mapping[c] = '權證代碼'
+            elif '流通' in c and '張' in c: col_mapping[c] = '流通張數'
+        
+        df = df.rename(columns=col_mapping)
 
-        # 確保數值欄位正確
-        cols_to_fix = ['買價', '賣價', '履約價', '剩餘天數']
-        for col in cols_to_fix:
-            if col not in df.columns:
-                # 若找不到欄位，嘗試模糊比對 (例如 "買 價")
-                found = False
-                for c in df.columns:
-                    if col in c:
-                        df = df.rename(columns={c: col})
-                        found = True
-                        break
-                if not found:
-                    return None, f"缺少必要欄位: {col}"
+        # 檢查必要欄位
+        required = ['買價', '賣價', '履約價', '剩餘天數', '標的價格']
+        for r in required:
+            if r not in df.columns:
+                return None, f"缺少必要欄位: {r} (請確認檔案是否包含此資訊)"
+            df[r] = pd.to_numeric(df[r], errors='coerce').fillna(0)
             
-            # 轉為數字，非數字變成 NaN 後補 0
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        if '流通張數' not in df.columns: df['流通張數'] = 0
+        else: df['流通張數'] = pd.to_numeric(df['流通張數'], errors='coerce').fillna(0)
 
-        if '流通張數' not in df.columns:
-            df['流通張數'] = 0 
-        else:
-            df['流通張數'] = pd.to_numeric(df['流通張數'], errors='coerce').fillna(0)
-
-        # 2. 計算邏輯
-        # 價差比 (若買價為0，設為 999)
+        # 2. 計算邏輯 (使用檔案中的標的價格)
+        # 價差比
         df['spread_pct'] = np.where(df['買價'] > 0, (df['賣價'] - df['買價']) / df['買價'] * 100, 999)
         
-        # 價內外程度
-        df['moneyness'] = (self.stock_price - df['履約價']) / df['履約價']
+        # 價內外程度 (Moneyness) = (標的價格 - 履約價) / 履約價
+        # 這裡直接用每行資料自己的「標的價格」算，最準確
+        df['moneyness'] = (df['標的價格'] - df['履約價']) / df['履約價']
         
-        # 3. 評分
+        # 3. 評分系統
         df['score'] = 0
         df['tags'] = ''
         
@@ -57,7 +55,7 @@ class GuTaiWarrantAnalyzer:
         df.loc[df['剩餘天數'] < 30, 'score'] -= 50
         df.loc[df['剩餘天數'] < 30, 'tags'] += '⚠️末日 '
 
-        # B. 價內外 (Delta 0.4~0.6)
+        # B. 價內外 (Delta 0.4~0.6 區間)
         target_zone = (df['moneyness'] >= -0.15) & (df['moneyness'] <= 0.05)
         df.loc[target_zone, 'score'] += 35
         df.loc[target_zone, 'tags'] += '🔥黃金區間 '
@@ -75,11 +73,8 @@ class GuTaiWarrantAnalyzer:
         # D. 地雷
         df.loc[df['賣價'] == 0, 'score'] = -999
         df.loc[df['賣價'] == 0, 'tags'] += '🚫無賣單 '
-        
-        if '流通張數' in df.columns:
-            # 假設 > 8000 張可能籌碼亂
-            df.loc[df['流通張數'] > 8000, 'score'] -= 50
-            df.loc[df['流通張數'] > 8000, 'tags'] += '🤯籌碼亂 '
+        df.loc[df['流通張數'] > 8000, 'score'] -= 50
+        df.loc[df['流通張數'] > 8000, 'tags'] += '🤯籌碼亂 '
 
         # 4. 狀態
         df['status'] = '觀察'
@@ -87,150 +82,134 @@ class GuTaiWarrantAnalyzer:
         df.loc[df['score'] <= 40, 'status'] = '❌ 剔除'
         df.loc[df['score'] < 0, 'status'] = '☠️ 危險'
 
-        # 輸出
-        out_cols = ['權證名稱', '權證代碼', '履約價', '剩餘天數', '買價', '賣價', 'spread_pct', 'tags', 'score', 'status']
-        if '流通張數' in df.columns:
-            out_cols.insert(7, '流通張數')
-            
-        # 只選存在的欄位
-        final_cols = [c for c in out_cols if c in df.columns]
+        # 輸出欄位
+        display_cols = ['權證名稱', '權證代碼', '標的價格', '履約價', '剩餘天數', '買價', '賣價', 'spread_pct', 'tags', 'score', 'status']
+        if '流通張數' in df.columns: display_cols.insert(8, '流通張數')
+        
+        final_cols = [c for c in display_cols if c in df.columns]
         return df[final_cols].sort_values(by='score', ascending=False), None
 
-# --- 輔助: 強力讀取與標題尋找 ---
-def load_data_robust(file):
+# --- 讀取邏輯 (專門處理雙行標題) ---
+def load_data_merged_header(file):
     filename = file.name.lower()
-    df = None
     
-    # 步驟 1: 嘗試多種編碼讀取
+    # 1. 讀取原始資料 (不設 header)
     try:
         if filename.endswith(('.xls', '.xlsx')):
-            # Excel 讀取
-            # 為了處理雙行標題，先讀多一點進來分析
-            df_raw = pd.read_excel(file, header=None, nrows=20)
+            df_raw = pd.read_excel(file, header=None)
         else:
-            # CSV 讀取 (優先 utf-8, 失敗轉 big5)
             try:
-                df_raw = pd.read_csv(file, header=None, nrows=20, encoding='utf-8-sig')
+                df_raw = pd.read_csv(file, header=None, encoding='utf-8-sig')
             except:
                 file.seek(0)
-                df_raw = pd.read_csv(file, header=None, nrows=20, encoding='big5')
+                df_raw = pd.read_csv(file, header=None, encoding='big5')
     except Exception as e:
         return None, f"檔案讀取失敗: {e}"
 
-    # 步驟 2: 尋找真正的 Header
-    # 策略: 找含有 '權證' 且含有 '買價' 或 '賣價' 的那一列
-    header_row_idx = 0
-    found_header = False
-    
-    for i, row in df_raw.iterrows():
+    # 2. 尋找「標題列」的位置
+    # 策略：找到含有 "代碼" 和 "名稱" 的那一行 (通常是下層標題)
+    header_idx = -1
+    for i, row in df_raw.head(20).iterrows():
         row_str = " ".join(row.astype(str).values)
-        if '權證' in row_str and ('買價' in row_str or '賣價' in row_str or '名稱' in row_str):
-            header_row_idx = i
-            found_header = True
+        if '代碼' in row_str and '名稱' in row_str:
+            header_idx = i
             break
     
-    # 步驟 3: 正式讀取
-    file.seek(0)
-    try:
-        if filename.endswith(('.xls', '.xlsx')):
-            df = pd.read_excel(file, header=header_row_idx)
-        else:
-            try:
-                df = pd.read_csv(file, header=header_row_idx, encoding='big5')
-            except:
-                file.seek(0)
-                df = pd.read_csv(file, header=header_row_idx, encoding='utf-8-sig')
-    except:
-        return None, "無法解析檔案內容"
+    if header_idx == -1:
+        return None, "找不到標題列 (需包含'代碼'與'名稱')"
 
-    # 步驟 4: 強力清洗欄位名稱
-    # 移除換行符號、空白
-    df.columns = df.columns.astype(str).str.replace(r'\n', '', regex=True).str.replace(' ', '')
+    # 3. 處理「雙層標題」合併 (針對權證達人寶典)
+    # 如果 header_idx 的上一行包含 "權證" 或 "標的"，代表是雙層標題
+    new_columns = []
     
-    # 步驟 5: 特殊處理「權證達人」的雙胞胎欄位 (例如兩個「名稱」，第二個通常是標的)
-    # 如果有欄位叫 "名稱.1" 或 "代碼.1"，這通常是 pandas 處理重複欄位的結果 -> 重新命名為標的
-    rename_dict = {}
-    for col in df.columns:
-        if '名稱.1' in col:
-            rename_dict[col] = '標的名稱'
-        elif '代碼.1' in col:
-            rename_dict[col] = '標的代碼'
-    
-    if rename_dict:
-        df = df.rename(columns=rename_dict)
+    if header_idx > 0:
+        row_upper = df_raw.iloc[header_idx - 1].fillna('').astype(str) # 上層 (例如: 標的)
+        row_lower = df_raw.iloc[header_idx].fillna('').astype(str)     # 下層 (例如: 名稱)
         
+        is_double_header = False
+        if '標的' in row_upper.values or '權證' in row_upper.values:
+            is_double_header = True
+
+        if is_double_header:
+            # 合併上下兩行
+            for up, low in zip(row_upper, row_lower):
+                up = up.strip()
+                low = low.strip()
+                if up == low: # 如果上下重複
+                    new_columns.append(low)
+                elif up == '':
+                    new_columns.append(low)
+                else:
+                    new_columns.append(f"{up}{low}") # 合併 (例如: 標的 + 名稱 -> 標的名稱)
+        else:
+            new_columns = row_lower.tolist()
+    else:
+        new_columns = df_raw.iloc[header_idx].fillna('').astype(str).tolist()
+
+    # 4. 重建 DataFrame
+    df = df_raw.iloc[header_idx + 1:].copy()
+    df.columns = new_columns
+    
+    # 清洗欄位名稱 (移除空白)
+    df.columns = df.columns.str.replace(' ', '').str.replace('\n', '')
+    
     return df, None
 
 # --- 網頁介面 ---
 st.set_page_config(page_title="股泰流權證篩選", layout="wide")
-st.title("📊 股泰流-全市場權證分析工具")
+st.title("📊 股泰流-全市場權證分析工具 (自動判讀版)")
+st.caption("支援 CSV/XLS，自動合併雙層標題，自動讀取母股價格")
 
-uploaded_file = st.file_uploader("📂 請上傳 CSV 或 Excel (xls/xlsx) 檔案", type=['csv', 'xls', 'xlsx'])
+uploaded_file = st.file_uploader("📂 上傳檔案", type=['csv', 'xls', 'xlsx'])
 
 if uploaded_file is not None:
-    df, error = load_data_robust(uploaded_file)
+    df, error = load_data_merged_header(uploaded_file)
     
     if error:
         st.error(error)
     else:
-        # --- 智慧欄位偵測 ---
-        # 優先順序: 1. 標的名稱 2. 標的代碼 3. 第19欄(index 18) 4. 第18欄(index 17)
+        # --- 尋找標的名稱欄位 ---
         target_col = None
+        # 優先找 "標的名稱"
+        if '標的名稱' in df.columns: target_col = '標的名稱'
+        elif '標的代碼' in df.columns: target_col = '標的代碼'
         
-        if '標的名稱' in df.columns:
-            target_col = '標的名稱'
-        elif '標的代碼' in df.columns:
-            target_col = '標的代碼'
-        else:
-            # 備用方案: 嘗試用位置判斷
-            if len(df.columns) > 18:
-                # 權證達人寶典通常 index 18 是標的名稱
-                possible_col = df.columns[18]
-                st.toast(f"提示: 未找到「標的名稱」欄位，嘗試使用第 19 欄「{possible_col}」作為篩選依據。")
-                target_col = possible_col
-            elif len(df.columns) > 17:
-                target_col = df.columns[17]
-
-        # 若還是找不到，顯示除錯資訊
         if target_col is None:
-            st.error("❌ 找不到「標的名稱」或「標的代碼」欄位。")
-            with st.expander("點擊查看讀取到的所有欄位 (Debug)"):
-                st.write(list(df.columns))
-                st.write("前 5 筆資料預覽:", df.head())
+            st.error("❌ 找不到「標的名稱」欄位。以下是偵測到的欄位，請檢查檔案：")
+            st.write(list(df.columns))
         else:
-            # --- 側邊欄與篩選 ---
+            # --- 側邊欄 ---
             with st.sidebar:
                 st.header("1️⃣ 選擇標的")
                 
-                # 排除空值
+                # 清洗資料: 移除標的名稱的空白
                 df[target_col] = df[target_col].astype(str).str.strip()
-                stock_list = sorted(df[df[target_col] != 'nan'][target_col].unique().tolist())
+                # 排除 nan
+                stock_list = sorted([x for x in df[target_col].unique() if x.lower() != 'nan' and x != ''])
                 
-                # 搜尋框
                 selected_stock = st.selectbox("輸入代號或名稱搜尋:", stock_list)
                 
-                # 執行篩選
+                # 篩選資料
                 df_filtered = df[df[target_col] == selected_stock].copy()
-                st.success(f"已選取: {selected_stock} ({len(df_filtered)} 檔)")
+                
+                st.success(f"已選取: {selected_stock}")
+                st.info(f"權證數量: {len(df_filtered)} 檔")
 
-                # 嘗試抓取標的價格 (如果檔案有的話)
-                # 權證達人可能有 '標的價格' 或 '標的股價'
-                current_price = 100.0
-                price_cols = [c for c in df_filtered.columns if '標的' in c and ('價' in c or 'Price' in c)]
-                if price_cols:
+                # 自動抓取價格顯示給使用者看 (不做修改)
+                current_price = 0
+                if '標的價格' in df_filtered.columns:
                     try:
-                        val = df_filtered.iloc[0][price_cols[0]]
-                        current_price = float(val)
+                        current_price = pd.to_numeric(df_filtered['標的價格']).mean()
+                        st.metric("目前標的價格 (自動讀取)", f"{current_price:.2f}")
                     except:
-                        pass
+                        st.warning("無法讀取標的價格")
                 
                 st.markdown("---")
-                st.header("2️⃣ 參數設定")
-                stock_price = st.number_input("母股股價", value=current_price, step=0.5)
+                st.caption("篩選標準：>60天 / 價外15%~價內5% / 低價差")
 
-            # --- 主畫面結果 ---
+            # --- 主畫面 ---
             if not df_filtered.empty:
-                analyzer = GuTaiWarrantAnalyzer(stock_price)
+                analyzer = GuTaiWarrantAnalyzer() # 不需傳入價格
                 result_df, err = analyzer.analyze(df_filtered)
                 
                 if err:
@@ -238,17 +217,22 @@ if uploaded_file is not None:
                 else:
                     st.subheader(f"🏆 {selected_stock} 分析結果")
                     
-                    tab1, tab2 = st.tabs(["✅ 推薦名單", "💣 地雷/觀察"])
+                    tab1, tab2, tab3 = st.tabs(["✅ 推薦名單", "💣 地雷/觀察", "📄 原始資料"])
                     
                     with tab1:
                         good = result_df[result_df['status'] == '✅ 股泰嚴選']
                         if not good.empty:
                             st.dataframe(
-                                good.style.format({'spread_pct': '{:.2f}%', '買價': '{:.2f}', '賣價': '{:.2f}'})
+                                good.style.format({'spread_pct': '{:.2f}%', '買價': '{:.2f}', '賣價': '{:.2f}', '標的價格': '{:.2f}'})
                                 .background_gradient(subset=['score'], cmap='Greens')
                             )
                         else:
                             st.warning("無符合「嚴選」標準的權證。")
                             
                     with tab2:
-                        st.dataframe(result_df[result_df['status'] != '✅ 股泰嚴選'])
+                        st.dataframe(result_df[result_df['status'] != '✅ 股泰嚴選'].style.format({'spread_pct': '{:.2f}%', '標的價格': '{:.2f}'}))
+                        
+                    with tab3:
+                        st.dataframe(df_filtered)
+            else:
+                st.warning("篩選後無資料，請確認檔案內容。")
