@@ -116,17 +116,17 @@ class GuTaiSOPAnalyzer:
         if green_light_mode:
             # === 🟢 綠燈戰法 (嚴格條件) ===
             
-            # 1. 成交量 > 800
-            add_fail_reason(df_clean['成交量'] <= 800, '成交量不足')
+            # 1. 成交量 > 150
+            add_fail_reason(df_clean['成交量'] <= 150, '成交量不足')
             
             # 2. 溢價率 8% ~ 16%
             add_fail_reason((df_clean['溢價率'] < 8) | (df_clean['溢價率'] > 16), '溢價率不符')
             
-            # 3. 剩餘天數 > 100天 (覆蓋原本的 60天)
-            add_fail_reason(df_clean['剩餘天數'] <= 100, '天數<100')
+            # 3. 剩餘天數 > 60天 (覆蓋原本的 30天)
+            add_fail_reason(df_clean['剩餘天數'] <= 60, '天數<60')
             
-            # 4. 有效槓桿 > 3.5
-            add_fail_reason(df_clean['有效槓桿'] <= 3.5, '槓桿過小')
+            # 4. 有效槓桿 > 2
+            add_fail_reason(df_clean['有效槓桿'] <= 2, '槓桿過小')
             
             # 5. 券商優先 (元大 > 統一 > 群益 > 國泰)
             # 模糊比對
@@ -328,3 +328,4 @@ if uploaded_file is not None:
                         st.markdown(f"### 剔除：{len(bad)} 檔")
                         def highlight_fail(val): return 'color: #ff4b4b;' 
                         st.dataframe(bad[base_cols].style.format(fmt).map(highlight_fail, subset=['未通過原因']))
+
