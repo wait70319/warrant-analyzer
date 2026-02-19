@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import io
 
-# --- 核心策略：股泰流 SOP + 綠燈戰法 ---
+# --- 核心策略：權證 SOP + 綠燈戰法 ---
 class GuTaiSOPAnalyzer:
     def __init__(self):
         pass
@@ -232,9 +232,9 @@ def to_excel(df):
 # --- 網頁介面 ---
 st.set_page_config(page_title="股泰流權證SOP", layout="wide")
 
-st.title("🛡️ 股泰流-權證 SOP 嚴格篩選器")
+st.title("🛡️ 權證 SOP 嚴格篩選器")
 st.markdown("""
-本工具依照 **「股泰流 SOP 表格」** 進行嚴格把關。
+本工具依照 **「權證 SOP 表格」** 進行嚴格把關。
 """)
 
 uploaded_file = st.file_uploader("📂 上傳權證報表 (Excel/CSV)", type=['csv', 'xls', 'xlsx'])
@@ -328,4 +328,5 @@ if uploaded_file is not None:
                         st.markdown(f"### 剔除：{len(bad)} 檔")
                         def highlight_fail(val): return 'color: #ff4b4b;' 
                         st.dataframe(bad[base_cols].style.format(fmt).map(highlight_fail, subset=['未通過原因']))
+
 
