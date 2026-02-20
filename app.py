@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 import io
 
-# --- 核心策略：權證 SOP + 綠燈戰法 ---
+# --- 核心策略：權證 SOP 雙模式分析器 ---
 class GuTaiSOPAnalyzer:
     def __init__(self):
         pass
 
-    def analyze(self, df, green_light_mode=False):
+    def analyze(self, df, mode="目前 (嚴格實戰)"):
         # 1. 欄位對應與資料清洗
         target_map = {
             '權證名稱': ['權證名稱'],
@@ -47,7 +47,6 @@ class GuTaiSOPAnalyzer:
             if best_match:
                 df_clean[target] = df[best_match]
             else:
-                # 若缺欄位給預設值
                 if target in ['權證名稱', '權證代碼', '標的名稱', '發行商']:
                     df_clean[target] = ''
                 else:
@@ -75,14 +74,8 @@ class GuTaiSOPAnalyzer:
         mask_issue = df_clean['發行張數'] > 0
         df_clean.loc[mask_issue, '流通比'] = (df_clean.loc[mask_issue, '流通張數'] / df_clean.loc[mask_issue, '發行張數']) * 100
         
-        # C. 單位校正 (統一單位)
-        # 波動率 & 溢價率：若 > 5 (例如 15)，視為 %，除以 100 變回 0.15 (如果原本就是小數點則不動)
-        # 但為了顯示好看，我們統一轉成 "百分比數值" (例如 15.5)
-        # 假設資料混雜：有的 0.15 有的 15.0
-        # 判斷邏輯：如果中位數 < 1，很可能是小數，乘 100
+        # C. 單位校正 (統一單位為百分比)
         for col in ['隱含波動率', '歷史波動率', '溢價率']:
-            # 簡單判斷：如果該欄位大部分值小於 2 (且大於0)，視為小數，乘 100 轉為 %
-            # 這裡用個別值判斷比較保險
             mask_small = (df_clean[col] > -2) & (df_clean[col] < 2) & (df_clean[col] != 0)
             df_clean.loc[mask_small, col] = df_clean.loc[mask_small, col] * 100
 
@@ -90,7 +83,7 @@ class GuTaiSOPAnalyzer:
         df_clean['價內外'] = (df_clean['標的價格'] - df_clean['履約價']) / df_clean['履約價']
 
 
-        # 3. 股泰流 SOP 嚴格篩選
+        # 3. SOP 嚴格篩選系統
         df_clean['SOP狀態'] = '通過'
         df_clean['未通過原因'] = ''
         
@@ -102,44 +95,43 @@ class GuTaiSOPAnalyzer:
             )
             df_clean.loc[mask, 'SOP狀態'] = '剔除'
 
-        # --- 基礎 SOP (任何模式都要遵守) ---
-        add_fail_reason(df_clean['剩餘天數'] < 60, '天數過短')
+        # --- 全域防雷底線 (不論哪種模式都必須遵守) ---
         add_fail_reason(df_clean['流通比'] > 80, '高流通地雷')
-        add_fail_reason(df_clean['價差比'] > 2.5, '價差過大')
+        add_fail_reason(df_clean['價差比'] > 2.5, '買賣價差過大')
         
-        # 隱波檢查
+        # 隱波檢查 (抓出莊家賣太貴的商品)
         has_vol = (df_clean['歷史波動率'] > 0) & (df_clean['隱含波動率'] > 0)
-        is_expensive = has_vol & (df_clean['隱含波動率'] > (df_clean['歷史波動率'] + 8)) # 容許 8% 差距
-        add_fail_reason(is_expensive, '隱波太貴')
+        is_expensive = has_vol & (df_clean['隱含波動率'] > (df_clean['歷史波動率'] + 8))
+        add_fail_reason(is_expensive, '隱波太貴(降波風險)')
 
-        # --- 模式分流：綠燈戰法 vs 一般篩選 ---
-        if green_light_mode:
-            # === 🟢 綠燈戰法 (嚴格條件) ===
+
+        # --- 模式分流 ---
+        if mode == "目前 (嚴格實戰)":
+            # === 🟢 目前模式：結合實質槓桿與券商防坑的 5 大濾網 ===
             
-            # 1. 成交量 > 150
-            add_fail_reason(df_clean['成交量'] <= 150, '成交量不足')
+            # 1. 充足交易量 (確保能安全下車)
+            add_fail_reason(df_clean['成交量'] < 500, '成交量不足(<500)')
             
-            # 2. 溢價率 8% ~ 16%
-            add_fail_reason((df_clean['溢價率'] < 8) | (df_clean['溢價率'] > 16), '溢價率不符')
+            # 2. 合理的溢價率 (抓出甜蜜點，避開太貴的合約)
+            add_fail_reason((df_clean['溢價率'] < 5) | (df_clean['溢價率'] > 15), '溢價率非甜蜜點(5~15%)')
             
-            # 3. 剩餘天數 > 60天 (覆蓋原本的 30天)
-            add_fail_reason(df_clean['剩餘天數'] <= 60, '天數<60')
+            # 3. 剩餘天數 (抵禦時間價值流失)
+            add_fail_reason(df_clean['剩餘天數'] < 60, '天數過短(<60天)')
             
-            # 4. 有效槓桿 > 2
-            add_fail_reason(df_clean['有效槓桿'] <= 2, '槓桿過小')
+            # 4. 合適的實質槓桿 (確保爆發力)
+            add_fail_reason(df_clean['有效槓桿'] < 3.0, '實質槓桿過小(<3倍)')
             
-            # 5. 券商優先 (元大 > 統一 > 群益 > 國泰)
-            # 模糊比對
-            target_issuers = ['元大', '統一', '群益', '國泰']
-            # 檢查發行商是否包含上述關鍵字
+            # 5. 券商優選 (避開不積極造市的莊家)
+            target_issuers = ['元大', '凱基', '富邦', '統一', '群益']
             pattern = '|'.join(target_issuers)
             is_target_issuer = df_clean['發行商'].astype(str).str.contains(pattern, na=False)
-            add_fail_reason(~is_target_issuer, '非優選券商')
-            
-            # 綠燈模式下，Delta 暫時不強制 (因為天數與溢價率已卡很死)，但可作參考
+            add_fail_reason(~is_target_issuer, '非大型優選券商')
             
         else:
-            # === 一般 SOP 模式 ===
+            # === 🟡 原始模式：基礎 SOP ===
+            # 只做最基本的安全防護，保留較多商品
+            add_fail_reason(df_clean['剩餘天數'] < 30, '天數過短(<30天)')
+            
             # 價內外/Delta 檢查
             has_delta = df_clean['Delta'].abs().sum() > 0
             if has_delta:
@@ -149,28 +141,29 @@ class GuTaiSOPAnalyzer:
                 sweet_zone = (df_clean['價內外'] >= -0.15) & (df_clean['價內外'] <= 0.05)
                 add_fail_reason(~sweet_zone, '非黃金區間')
 
-        # 4. 排序
+
+        # 4. 排序與最佳化
         df_clean['排序權重'] = df_clean['價差比']
         df_clean.loc[df_clean['SOP狀態'] == '剔除', '排序權重'] += 1000
         
-        # 如果是綠燈模式，通過的依據「發行商優先順序」排序
-        if green_light_mode:
-            # 建立優先權分數: 元大(1) > 統一(2) > 群益(3) > 國泰(3) > 其他(9)
+        if mode == "目前 (嚴格實戰)":
+            # 建立券商優先權分數: 元大/凱基(1) > 富邦/統一(2) > 群益(3) > 其他(9)
             conditions = [
-                df_clean['發行商'].astype(str).str.contains('元大'),
-                df_clean['發行商'].astype(str).str.contains('統一'),
-                df_clean['發行商'].astype(str).str.contains('群益'),
-                df_clean['發行商'].astype(str).str.contains('國泰')
+                df_clean['發行商'].astype(str).str.contains('元大|凱基'),
+                df_clean['發行商'].astype(str).str.contains('富邦|統一'),
+                df_clean['發行商'].astype(str).str.contains('群益')
             ]
-            choices = [1, 2, 3, 3]
+            choices = [1, 2, 3]
             df_clean['券商排序'] = np.select(conditions, choices, default=9)
             
             # 排序：狀態(通過在前) -> 券商優先 -> 價差小
-            return df_clean.sort_values(by=['SOP狀態', '券商排序', '價差比'], ascending=[False, True, True]), None
+            result_df = df_clean.sort_values(by=['SOP狀態', '券商排序', '價差比'], ascending=[False, True, True])
+        else:
+            result_df = df_clean.sort_values(by='排序權重')
 
-        return df_clean.sort_values(by='排序權重'), None
+        return result_df, None
 
-# --- 檔案讀取 ---
+# --- 檔案讀取 (維持原樣) ---
 def load_data_robust(file):
     filename = file.name.lower()
     try:
@@ -185,7 +178,6 @@ def load_data_robust(file):
     except Exception as e:
         return None, f"檔案讀取失敗: {e}"
 
-    # 找標題
     header_idx = -1
     for i, row in df_raw.head(20).iterrows():
         row_str = " ".join(row.astype(str).values)
@@ -195,7 +187,6 @@ def load_data_robust(file):
     
     if header_idx == -1: return None, "找不到標題列"
 
-    # 雙層標題合併
     new_columns = []
     if header_idx > 0:
         row_upper = df_raw.iloc[header_idx - 1].fillna('').astype(str)
@@ -209,7 +200,6 @@ def load_data_robust(file):
     else:
         new_columns = df_raw.iloc[header_idx].fillna('').astype(str).tolist()
 
-    # 除重
     seen = {}
     deduped = []
     for col in new_columns:
@@ -229,13 +219,11 @@ def to_excel(df):
     processed_data = output.getvalue()
     return processed_data
 
-# --- 網頁介面 ---
-st.set_page_config(page_title="股泰流權證SOP", layout="wide")
+# --- 網頁介面 UI ---
+st.set_page_config(page_title="實戰權證自動篩選器", layout="wide")
 
-st.title("🛡️ 權證 SOP 嚴格篩選器")
-st.markdown("""
-本工具依照 **「權證 SOP 表格」** 進行嚴格把關。
-""")
+st.title("🛡️ 實戰權證自動篩選器")
+st.markdown("將市場報價表上傳，系統將自動剔除高風險地雷，為您找出最具爆發力的優質權證。")
 
 uploaded_file = st.file_uploader("📂 上傳權證報表 (Excel/CSV)", type=['csv', 'xls', 'xlsx'])
 
@@ -245,7 +233,6 @@ if uploaded_file is not None:
     if error:
         st.error(error)
     else:
-        # 標的選擇
         target_col = next((c for c in df.columns if '標的名稱' in c), None)
         if not target_col: target_col = next((c for c in df.columns if '標的代碼' in c), None)
 
@@ -269,64 +256,71 @@ if uploaded_file is not None:
                     except: pass
                 
                 st.markdown("---")
-                st.header("🚦 策略設定")
-                green_light = st.checkbox("啟用「好權證綠燈」篩選", value=False)
-                if green_light:
+                st.header("🚦 策略模式設定")
+                
+                # 切換兩種模式
+                filter_mode = st.radio(
+                    "選擇篩選強度：",
+                    ["目前 (嚴格實戰)", "原始 (基礎防雷)"],
+                    index=0
+                )
+                
+                if filter_mode == "目前 (嚴格實戰)":
                     st.success("""
-                    **🟢 綠燈條件啟動：**
-                    - 成交量 > 800 張
-                    - 溢價率 8% ~ 16%
-                    - 剩餘天數 > 100 天
-                    - 有效槓桿 > 3.5 倍
-                    - 券商：元大 > 統一 > 群益/國泰
+                    🟢 **嚴格實戰模式啟動：**
+                    - 交易量 > 500 張 (確保流動性)
+                    - 溢價率 5% ~ 15% (甜蜜點)
+                    - 剩餘天數 > 60 天 (抵抗時間流失)
+                    - 實質槓桿 > 3 倍 (確保爆發力)
+                    - 鎖定優良造市商 (元大/凱基/富邦等)
+                    """)
+                else:
+                    st.info("""
+                    🟡 **原始基礎模式啟動：**
+                    - 僅過濾高流通、大價差地雷
+                    - 剩餘天數 > 30 天
+                    - 基礎 Delta / 價內外區間檢查
                     """)
 
             # 執行分析
             if not df_filtered.empty:
                 analyzer = GuTaiSOPAnalyzer()
-                result_df, err = analyzer.analyze(df_filtered, green_light_mode=green_light)
+                result_df, err = analyzer.analyze(df_filtered, mode=filter_mode)
                 
                 if err:
                     st.error(err)
                 else:
-                    # 顯示欄位
                     base_cols = ['權證名稱', '發行商', '買價', '賣價', '價差比', '成交量', 
                                  '有效槓桿', '溢價率', '剩餘天數', 'Delta', '流通比', '未通過原因']
                     
-                    # 格式
                     fmt = {
                         'Delta': '{:.2f}', '價差比': '{:.2f}%', '流通比': '{:.1f}%',
                         '溢價率': '{:.2f}%', '有效槓桿': '{:.2f}',
                         '買價': '{:.2f}', '賣價': '{:.2f}', '成交量': '{:.0f}'
                     }
 
-                    # 結果分頁
                     tab1, tab2 = st.tabs(["✅ 嚴選名單 (Pass)", "❌ 剔除區 (Fail)"])
                     
                     with tab1:
                         good = result_df[result_df['SOP狀態'] == '通過']
                         st.markdown(f"### 符合標準：{len(good)} 檔")
                         
-                        # 下載按鈕 (放在結果上方)
                         if not good.empty:
-                            excel_data = to_excel(good[base_cols[:-1]]) # 匯出時不包含「未通過原因」
+                            excel_data = to_excel(good[base_cols[:-1]])
                             st.download_button(
-                                label="📥 一鍵匯出 Excel (嚴選名單)",
+                                label=f"📥 一鍵匯出 Excel ({filter_mode}名單)",
                                 data=excel_data,
-                                file_name=f'{selected_stock}_股泰嚴選.xlsx',
+                                file_name=f'{selected_stock}_{filter_mode[:2]}嚴選.xlsx',
                                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                             )
-                            
                             st.dataframe(good[base_cols[:-1]].style.format(fmt))
                         else:
-                            st.warning("⚠️ 無符合標準的權證。")
-                            if green_light:
-                                st.info("建議：綠燈條件較嚴格，可嘗試關閉綠燈模式，查看符合基礎 SOP 的權證。")
+                            st.warning("⚠️ 查無符合標準的權證。")
+                            if filter_mode == "目前 (嚴格實戰)":
+                                st.info("💡 建議：嚴格模式條件較硬，您可以嘗試切換至「原始 (基礎防雷)」模式看看是否有其他選擇。")
                     
                     with tab2:
                         bad = result_df[result_df['SOP狀態'] == '剔除']
                         st.markdown(f"### 剔除：{len(bad)} 檔")
                         def highlight_fail(val): return 'color: #ff4b4b;' 
                         st.dataframe(bad[base_cols].style.format(fmt).map(highlight_fail, subset=['未通過原因']))
-
-
